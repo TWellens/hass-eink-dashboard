@@ -16,27 +16,114 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from ..const import (
     COLOR_BLACK,
     COLOR_GRAY,
-    DEFAULT_CARD_STYLE,
+    COLOR_LIGHT_GRAY,
     DEFAULT_ROW_H,
     PADDING,
     DisplayConfig,
     Widget,
     color_to_hex,
 )
-from ..svg_render import _mdi_svg_filter
 from ._helpers import (
-    _auto_row_height,
-    _card_insets,
     _color_context,
-    _metrics_context,
     _title_layout,
     _widget_dim,
 )
+
+# Layout constants for the agenda-style calendar (fixed pixel sizes
+# for consistent legibility on e-ink at any widget height).
+_GROUP_HEADING_SZ = 15
+_GROUP_HEADING_ADVANCE = 24
+_HERO_TIME_SZ = 54
+_HERO_TIME_ADVANCE = 62
+_HERO_SUMMARY_SZ = 28
+_HERO_SUMMARY_ADVANCE = 36
+_HERO_INTRO_GAP = 4
+_EVENT_ROW_SZ = 24
+_EVENT_ROW_ADVANCE = 34
+_EVENT_TIME_COL_W = 90
+_SECTION_GAP = 18
+_LINE_GAP = 8
+
+# Curated "Next appointment" translations.  Languages missing here
+# fall back to English; no attempt is made at automatic translation.
+_NEXT_APPT_HEADINGS: dict[str, str] = {
+    "en": "NEXT APPOINTMENT",
+    "de": "NÄCHSTER TERMIN",
+    "fr": "PROCHAIN RENDEZ-VOUS",
+    "es": "PRÓXIMA CITA",
+    "it": "PROSSIMO APPUNTAMENTO",
+    "nl": "VOLGENDE AFSPRAAK",
+    "pt": "PRÓXIMO COMPROMISSO",
+    "da": "NÆSTE AFTALE",
+    "sv": "NÄSTA MÖTE",
+    "nb": "NESTE AVTALE",
+}
+
+
+def _next_appointment_heading(language: str) -> str:
+    """Return the localized "next appointment" heading."""
+    lang = language.split("-")[0].lower()
+    return _NEXT_APPT_HEADINGS.get(lang, _NEXT_APPT_HEADINGS["en"])
+
+
+def _fmt_time(hm: tuple[int, int] | None, time_format: str) -> str:
+    """Return an ``HH:MM`` (or 12-hour) label for a parsed start time."""
+    if hm is None:
+        return ""
+    hour, minute = hm
+    if time_format == "12":
+        ampm = "AM" if hour < 12 else "PM"
+        h12 = hour % 12 or 12
+        return f"{h12}:{minute:02d} {ampm}"
+    return f"{hour}:{minute:02d}"
+
+
+def _group_heading_for(
+    event_date: date, today: date, language: str
+) -> str:
+    """Return the uppercase group heading for an event date.
+
+    Uses relative labels ("TODAY"/"TOMORROW", localized) for the
+    two nearest days, weekday abbreviations for the following
+    week, and an abbreviated month + day beyond that.
+    """
+    from ..render import (
+        _month_abbrev,
+        _relative_day_phrases,
+        _weekday_abbrev,
+    )
+
+    delta = (event_date - today).days
+    today_phrase, tomorrow_phrase, _ = _relative_day_phrases(language)
+    if delta <= 0:
+        return today_phrase.upper()
+    if delta == 1:
+        return tomorrow_phrase.upper()
+    if 2 <= delta < 7:
+        return _weekday_abbrev(event_date, language).upper()
+    return f"{_month_abbrev(event_date, language)} {event_date.day}".upper()
+
+
+def _truncate_to_width(text: str, font_sz: int, max_w: int) -> str:
+    """Truncate a string to fit ``max_w`` pixels at ``font_sz``.
+
+    Uses a coarse Roboto width heuristic (~0.55 × font size per
+    glyph).  When truncation happens an ellipsis is appended.
+    """
+    if max_w <= 0 or not text:
+        return text
+    char_w = max(1.0, font_sz * 0.55)
+    max_chars = int(max_w // char_w)
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 1:
+        return "…"
+    return text[: max_chars - 1].rstrip() + "…"
 
 
 def _build_calendar_context(
@@ -45,30 +132,23 @@ def _build_calendar_context(
 ) -> dict[str, object]:
     """Build Jinja2 template context for the calendar widget.
 
-    Renders upcoming calendar events as a list of card rows.
-    Events are sourced from
-    ``states[entity_id]["attributes"]["events"]``, which is
-    injected by ``_fetch_calendar_events()`` before rendering.
-
-    Icon urgency rules:
-
-    - Happening now: black-filled circle.
-    - Today (not now): gray-filled circle.
-    - Future: outlined circle (white fill, black stroke).
-
-    The date/time value text is always black regardless of
-    urgency; the event summary name is always gray. Urgency is
-    conveyed by the icon fill/outline alone.
+    Renders upcoming calendar events as a minimalist agenda:
+    a hero block highlighting the next event with a large,
+    bold start time and its title, followed by compact rows
+    of remaining events grouped by day.  Events are sourced
+    from ``states[entity_id]["attributes"]["events"]``, which
+    is injected by ``_fetch_calendar_events()`` before rendering.
 
     Args:
         widget: Widget config dict.  Recognised keys:
             ``entity`` (calendar entity ID),
             ``max_events`` (int, default 5),
             ``title`` (optional header string),
-            ``bold_value`` (render the right-aligned date/time
-            value in bold; default ``False``),
-            ``card_style`` (``"border"``, ``"left_bar"``,
-            or ``"none"``), ``x``, ``w``, ``h``.
+            ``bold_value`` (accepted for backward compat;
+            no visual effect in the agenda layout),
+            ``card_style`` (accepted for backward compat;
+            no visual effect in the agenda layout),
+            ``x``, ``w``, ``h``.
         config: Display config with ``states``,
             ``display_levels``, ``time_format``, and ``language``.
 
@@ -80,8 +160,6 @@ def _build_calendar_context(
         remain after capping at ``max_events``.
     """
     from ..render import (
-        _compute_metrics,
-        _format_calendar_label,
         _get_today,
         _is_event_now,
         _parse_calendar_dt,
@@ -92,9 +170,7 @@ def _build_calendar_context(
 
     entity_id: str = widget.get("entity", "")
     max_events: int = int(widget.get("max_events", 5))
-    card_style = widget.get("card_style", DEFAULT_CARD_STYLE)
     title: str = widget.get("title", "")
-    value_bold: bool = widget.get("bold_value", False)
     time_format: str = config.get("time_format", "24")
     language: str = config.get("language", "en")
     states = config.get("states", {})
@@ -127,61 +203,122 @@ def _build_calendar_context(
     today = _get_today()
     now = datetime.now()
 
-    num_rows = len(visible)
-    svg_h = _widget_dim(
-        widget,
-        "h",
-        _auto_row_height(title, num_rows),
+    # Content area within the widget, honouring PADDING left/right.
+    lpad = PADDING
+    rpad = PADDING
+    content_w = max(1, svg_w - lpad - rpad)
+
+    # Hero (first, most urgent event).
+    first = visible[0]
+    first_start = str(first.get("start", ""))
+    first_end = str(first.get("end", ""))
+    first_summary = str(first.get("summary", ""))
+    first_all_day = bool(first.get("all_day", False))
+    first_date, first_hm = _parse_calendar_dt(first_start)
+    first_is_now = _is_event_now(first_start, first_end, now)
+
+    hero_time = _fmt_time(first_hm, time_format)
+    hero_is_now = first_is_now and bool(hero_time)
+    hero_summary = _truncate_to_width(
+        first_summary, _HERO_SUMMARY_SZ, content_w
     )
-    title_font_sz, content_y, content_h = _title_layout(title, svg_h)
-    row_h = content_h // num_rows
+    hero_context_label = _group_heading_for(first_date, today, language)
+    hero_heading = _next_appointment_heading(language)
 
-    m = _compute_metrics(row_h)
-    icon_stroke_w = m.border * 3 if display_levels <= 2 else m.border
-    divider_stroke_w = m.divider * 3 if display_levels <= 2 else m.divider
-    x_off, r_inset, bar_width = _card_insets(m, card_style, display_levels)
-    lpad = m.padding if x_off == 0 else 0
-    rpad = m.padding if r_inset == 0 else 0
-
-    # Build the calendar icon once; all rows share the same glyph.
-    icon_svg = _mdi_svg_filter("calendar", m.icon_inner)
-
-    rows: list[dict[str, object]] = []
-    for i, event in enumerate(visible):
+    # Remaining events, grouped by their day heading.  Order is
+    # preserved from the input (no re-sorting).
+    groups: list[dict[str, object]] = []
+    time_col_w = _EVENT_TIME_COL_W
+    summary_col_w = max(1, content_w - time_col_w - _LINE_GAP)
+    for event in visible[1:]:
         start = str(event.get("start", ""))
-        end = str(event.get("end", ""))
         summary = str(event.get("summary", ""))
         all_day = bool(event.get("all_day", False))
-
-        label = _format_calendar_label(
-            start, all_day, today, time_format, language
-        )
-        is_now = _is_event_now(start, end, now)
-        start_date, _ = _parse_calendar_dt(start)
-        is_today = start_date == today
-
-        if is_now:
-            icon_fill = color_to_hex(COLOR_BLACK)
-            use_outline = False
+        event_date, hm = _parse_calendar_dt(start)
+        heading = _group_heading_for(event_date, today, language)
+        time_text = "" if all_day else _fmt_time(hm, time_format)
+        row = {
+            "time": time_text,
+            "summary": _truncate_to_width(
+                summary, _EVENT_ROW_SZ, summary_col_w
+            ),
+        }
+        if not groups or groups[-1]["heading"] != heading:
+            groups.append({"heading": heading, "rows": [row]})
         else:
-            icon_fill = color_to_hex(COLOR_GRAY)
-            use_outline = not is_today
-        value_fill = color_to_hex(COLOR_BLACK)
+            rows_list: list[dict[str, str]] = groups[-1]["rows"]  # type: ignore[assignment]
+            rows_list.append(row)
 
-        rows.append(
-            {
-                "y": content_y + i * row_h,
-                "primary": summary,
-                "secondary": "",
-                "value": label,
-                "icon_svg": icon_svg,
-                "icon_outline": use_outline,
-                "icon_fill": icon_fill,
-                "secondary_fill": color_to_hex(COLOR_GRAY),
-                "value_fill": value_fill,
-                "letter": "",
-            }
+    # Layout: walk top-down assigning y coordinates to each block.
+    # svg_h is honoured when the user set an explicit height,
+    # otherwise the natural content height is used.
+    y = 0
+
+    # Optional widget title reserves a title strip at the top.
+    show_title = bool(title)
+    if show_title:
+        # _title_layout expects an svg_h; compute natural body
+        # height first and derive title advance from it below.
+        pass
+
+    hero_heading_y = 0
+    hero_time_y = 0
+    hero_summary_y = 0
+    y += _GROUP_HEADING_ADVANCE  # hero heading
+    hero_time_y = y + _HERO_INTRO_GAP
+    if hero_time:
+        y = hero_time_y + _HERO_TIME_ADVANCE
+    else:
+        y = hero_time_y
+    hero_summary_y = y
+    y += _HERO_SUMMARY_ADVANCE
+
+    if groups:
+        y += _SECTION_GAP
+
+    for group in groups:
+        group["heading_y"] = y
+        y += _GROUP_HEADING_ADVANCE
+        rows_list = group["rows"]  # type: ignore[assignment]
+        for row in rows_list:
+            row["y"] = y
+            y += _EVENT_ROW_ADVANCE
+        y += _LINE_GAP
+    if groups:
+        # Drop the trailing gap after the last group.
+        y -= _LINE_GAP
+
+    natural_body = y + _LINE_GAP  # small bottom breathing room
+
+    # Reserve title space above the agenda body when requested.
+    if show_title:
+        title_font_sz, content_y, _content_h = _title_layout(
+            title, natural_body + 40
         )
+        title_advance = content_y
+    else:
+        title_font_sz = 0
+        title_advance = 0
+
+    svg_h = _widget_dim(widget, "h", natural_body + title_advance)
+
+    # Shift all agenda y positions below the title strip.
+    hero_heading_y += title_advance
+    hero_time_y += title_advance
+    hero_summary_y += title_advance
+    for group in groups:
+        group["heading_y"] = int(group["heading_y"]) + title_advance
+        for row in group["rows"]:  # type: ignore[assignment]
+            row["y"] = int(row["y"]) + title_advance
+
+    # Optional thin divider lines between date groups.  On 2-level
+    # displays widen the stroke so the dither still reads as a
+    # solid rule.
+    divider_stroke_w = 3 if display_levels <= 2 else 1
+
+    hex_black = color_to_hex(COLOR_BLACK)
+    hex_gray = color_to_hex(COLOR_GRAY)
+    hex_light_gray = color_to_hex(COLOR_LIGHT_GRAY)
 
     return {
         "w": svg_w,
@@ -189,19 +326,29 @@ def _build_calendar_context(
         "has_rows": True,
         "title": title,
         "title_font_sz": title_font_sz,
-        "content_y": content_y,
-        "content_h": content_h,
-        "card_style": card_style,
-        "bar_width": bar_width,
-        **_metrics_context(m),
-        **_color_context(),
-        "row_h": row_h,
-        "rows": rows,
-        "x_off": x_off,
-        "r_inset": r_inset,
         "lpad": lpad,
-        "rpad": rpad,
-        "icon_stroke_w": icon_stroke_w,
+        "content_w": content_w,
+        "time_col_w": time_col_w,
+        # Hero block.
+        "hero_heading": hero_heading,
+        "hero_context_label": hero_context_label,
+        "hero_heading_y": hero_heading_y,
+        "hero_time": hero_time,
+        "hero_time_y": hero_time_y,
+        "hero_time_sz": _HERO_TIME_SZ,
+        "hero_summary": hero_summary,
+        "hero_summary_y": hero_summary_y,
+        "hero_summary_sz": _HERO_SUMMARY_SZ,
+        "hero_is_now": hero_is_now,
+        # Group heading + row typography.
+        "group_heading_sz": _GROUP_HEADING_SZ,
+        "event_row_sz": _EVENT_ROW_SZ,
+        # Groups of remaining events.
+        "groups": groups,
+        # Colors.
+        "hex_black": hex_black,
+        "hex_gray": hex_gray,
+        "hex_light_gray": hex_light_gray,
         "divider_stroke_w": divider_stroke_w,
-        "value_bold": value_bold,
+        **_color_context(),
     }

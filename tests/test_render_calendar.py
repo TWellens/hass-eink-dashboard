@@ -573,6 +573,72 @@ class TestRenderCalendar:
             svg = render_widget_svg(w, self._config())
         assert "Doctor Appointment" in svg
 
+    def test_calendar_events_sorted_by_start(self) -> None:
+        # HA's calendar.get_events may return recurring instances
+        # before earlier one-off events; the widget must sort so
+        # the earliest event lands in the hero block and later ones
+        # are truncated by max_events.
+        states: dict[str, Any] = {
+            "calendar.unsorted": {
+                "state": "off",
+                "attributes": {
+                    "friendly_name": "Unsorted",
+                    "events": [
+                        {
+                            "start": "2026-06-15T09:00:00",
+                            "end": "2026-06-15T10:00:00",
+                            "summary": "Recurring Late",
+                            "all_day": False,
+                        },
+                        {
+                            "start": "2026-06-12T08:00:00",
+                            "end": "2026-06-12T09:00:00",
+                            "summary": "Earlier Single",
+                            "all_day": False,
+                        },
+                    ],
+                },
+            }
+        }
+        w = self._widget(entity="calendar.unsorted", max_events=1)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config(states=states))
+        assert "Earlier Single" in svg
+        assert "Recurring Late" not in svg
+
+    def test_calendar_all_day_sorts_before_timed_same_day(self) -> None:
+        # An all-day event on the same day as a timed event sorts
+        # first (all-day events start at 00:00 conceptually).
+        states: dict[str, Any] = {
+            "calendar.mixed": {
+                "state": "off",
+                "attributes": {
+                    "friendly_name": "Mixed",
+                    "events": [
+                        {
+                            "start": "2026-06-12T10:00:00",
+                            "end": "2026-06-12T11:00:00",
+                            "summary": "Timed Event",
+                            "all_day": False,
+                        },
+                        {
+                            "start": "2026-06-12",
+                            "end": "2026-06-13",
+                            "summary": "All Day",
+                            "all_day": True,
+                        },
+                    ],
+                },
+            }
+        }
+        w = self._widget(entity="calendar.mixed", max_events=1)
+        with patch(_PATCH_NOW, wraps=dt.date) as mock_dt:
+            mock_dt.today.return_value = _TODAY
+            svg = render_widget_svg(w, self._config(states=states))
+        assert "All Day" in svg
+        assert "Timed Event" not in svg
+
     def test_calendar_all_day_event_no_time(self) -> None:
         # All-day event label is "Today" with no colon-separated time.
         w = self._widget(entity="calendar.allday_cal", h=56)
