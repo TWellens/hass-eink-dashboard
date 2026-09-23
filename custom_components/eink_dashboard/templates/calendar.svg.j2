@@ -1,69 +1,48 @@
-{%- from "_macros.svg.j2" import widget_title -%}
+{%- from "_macros.svg.j2" import widget_title, card_container,
+    card_row -%}
 <svg xmlns="http://www.w3.org/2000/svg"
      width="{{ w }}" height="{{ h }}">
 {%- if has_rows -%}
 {{ widget_title(title, title_font_sz, fill=hex_gray) }}
-
-{#-  Hero: "NEXT APPOINTMENT" heading, big bold time, event title. -#}
-<text
-  x="{{ lpad }}" y="{{ hero_heading_y }}"
-  font-family="Roboto"
-  font-size="{{ group_heading_sz }}"
-  font-weight="bold"
-  dominant-baseline="hanging"
-  fill="{{ hex_gray }}">{{ hero_heading }}</text>
-{%- if hero_time %}
-<text
-  x="{{ lpad }}" y="{{ hero_time_y }}"
-  font-family="Roboto"
-  font-size="{{ hero_time_sz }}"
-  font-weight="bold"
-  dominant-baseline="hanging"
-  fill="{{ hex_black }}">{{ hero_time }}</text>
-{%- endif %}
-<text
-  x="{{ lpad }}" y="{{ hero_summary_y }}"
-  font-family="Roboto"
-  font-size="{{ hero_summary_sz }}"
-  dominant-baseline="hanging"
-  fill="{{ hex_black }}">{{ hero_summary }}</text>
-
-{#-  Grouped remaining events. -#}
-{%- for group in groups %}
-{%- if not loop.first %}
+{%- call card_container(
+    x=0, y=content_y, w=w, h=content_h,
+    card_style=card_style,
+    radius=m_radius, border=m_border,
+    bar_width=bar_width,
+    border_color=hex_black, bar_color=hex_gray) -%}
+{%- for row in rows -%}
+{{ card_row(
+    x=x_off, y=row.y,
+    w=w - x_off - r_inset, row_h=row_h,
+    padding=m_padding, icon_dia=m_icon_dia,
+    inner_gap=m_inner_gap, border=icon_stroke_w,
+    font_primary=m_font_primary,
+    font_secondary=m_font_secondary,
+    icon_inner=m_icon_inner,
+    letter_font_sz=m_font_letter,
+    primary=row.primary,
+    secondary=row.secondary,
+    value=row.value,
+    icon_svg=row.icon_svg,
+    icon_fill=row.icon_fill,
+    icon_outline=row.icon_outline,
+    primary_fill=hex_gray,
+    value_fill=row.value_fill,
+    secondary_fill=row.secondary_fill,
+    value_bold=value_bold,
+    letter=row.letter,
+    lpad=lpad, rpad=rpad,
+    hex_black=hex_black, hex_white=hex_white) }}
+{%- if not loop.last -%}
 <line
-  x1="{{ lpad }}"
-  y1="{{ group.heading_y - 6 }}"
-  x2="{{ w - lpad }}"
-  y2="{{ group.heading_y - 6 }}"
+  x1="{{ x_off + lpad }}"
+  y1="{{ row.y + row_h }}"
+  x2="{{ w - r_inset - rpad }}"
+  y2="{{ row.y + row_h }}"
   stroke="{{ hex_light_gray }}"
   stroke-width="{{ divider_stroke_w }}"/>
-{%- endif %}
-<text
-  x="{{ lpad }}" y="{{ group.heading_y }}"
-  font-family="Roboto"
-  font-size="{{ group_heading_sz }}"
-  font-weight="bold"
-  dominant-baseline="hanging"
-  fill="{{ hex_gray }}">{{ group.heading }}</text>
-{%- for row in group.rows %}
-{%- if row.time %}
-<text
-  x="{{ lpad }}" y="{{ row.y }}"
-  font-family="Roboto"
-  font-size="{{ event_row_sz }}"
-  font-weight="bold"
-  dominant-baseline="hanging"
-  fill="{{ hex_black }}">{{ row.time }}</text>
-{%- endif %}
-<text
-  x="{{ lpad + time_col_w }}" y="{{ row.y }}"
-  font-family="Roboto"
-  font-size="{{ event_row_sz }}"
-  dominant-baseline="hanging"
-  fill="{{ hex_black }}">{{ row.summary }}</text>
-{%- endfor %}
-{%- endfor %}
+{%- endif -%}
+{%- endfor -%}
+{%- endcall -%}
 {%- endif -%}
 </svg>
-
