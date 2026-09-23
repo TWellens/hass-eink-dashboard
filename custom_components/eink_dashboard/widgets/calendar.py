@@ -196,7 +196,21 @@ def _build_calendar_context(
     if not raw_events:
         return empty_ctx
 
-    visible = list(raw_events[:max_events])
+    # HA's calendar.get_events response is not guaranteed to be
+    # chronological — some integrations return recurring instances
+    # grouped separately from one-off events, which would push
+    # earlier appointments below later ones.  Sort by (date, time)
+    # with all-day events first on their day.
+    def _event_sort_key(
+        e: dict[str, object],
+    ) -> tuple[date, int, int]:
+        ev_date, hm = _parse_calendar_dt(str(e.get("start", "")))
+        if hm is None:
+            return (ev_date, -1, -1)
+        return (ev_date, hm[0], hm[1])
+
+    sorted_events = sorted(raw_events, key=_event_sort_key)
+    visible = list(sorted_events[:max_events])
     if not visible:
         return empty_ctx
 
